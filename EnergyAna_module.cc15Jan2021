@@ -1,0 +1,937 @@
+//  Code developed for estimating charge from SpacePoint object with "reco3d" module but this object is not availble in MUSUN sample so it is not is use for the time being // So now going to developo code for calculating the tracklength using Space Point object : 
+//  Date - 24/April/2020/ 
+// LArSoft includes
+#include "lardataobj/Simulation/SimChannel.h"
+#include "lardataobj/RecoBase/Hit.h"
+#include "lardataobj/RecoBase/Cluster.h"
+#include "lardataobj/RecoBase/SpacePoint.h"
+#include "lardata/DetectorInfoServices/DetectorPropertiesService.h"
+#include "lardata/DetectorInfoServices/DetectorClocksService.h"
+#include "larcore/Geometry/Geometry.h"
+#include "larcorealg/Geometry/GeometryCore.h"
+#include "larcoreobj/SimpleTypesAndConstants/geo_types.h"
+#include "nusimdata/SimulationBase/MCParticle.h"
+#include "nusimdata/SimulationBase/MCTruth.h"
+#include "larsim/Simulation/LArG4Parameters.h"
+
+//#include "root/dune/AnaUtils/DUNEAnaSpacePointUtils.h"  // My addition
+// Framework includes
+#include "art/Framework/Core/EDAnalyzer.h"
+#include "art/Framework/Principal/Event.h"
+#include "art/Framework/Principal/Handle.h"
+#include "art/Framework/Services/Registry/ServiceHandle.h"
+#include "art_root_io/TFileService.h"
+#include "art/Framework/Core/ModuleMacros.h"
+#include "canvas/Persistency/Common/FindManyP.h"
+#include "canvas/Utilities/Exception.h"
+
+// Utility libraries
+#include "messagefacility/MessageLogger/MessageLogger.h"
+#include "fhiclcpp/ParameterSet.h"
+#include "fhiclcpp/types/Table.h"
+#include "fhiclcpp/types/Atom.h"
+#include "cetlib/pow.h" // cet::sum_of_squares()
+
+// ROOT includes. Note: To look up the properties of the ROOT classes,
+// use the ROOT web site; e.g.,
+// <https://root.cern.ch/doc/master/annotated.html>
+#include "TH1.h"
+#include "TF2.h"
+#include "TH2.h"
+#include "TTree.h"
+#include "TLorentzVector.h"
+#include "TMath.h"
+#include "TVector3.h"
+#include "TVectorD.h"
+#include "TMatrixD.h"
+#include "TMatrixDSym.h"
+#include "TGraph2D.h"
+#include "TPolyLine3D.h"
+#include"TFile.h"
+#include"TCanvas.h"
+#include "TStyle.h"
+#include <cassert>
+// C++ inclu
+//ides
+#include <map>
+#include <cmath>
+
+using namespace std;
+
+namespace lar {
+namespace example {
+
+
+  
+  class EnergyAna : public art::EDAnalyzer
+  {
+  public:
+
+  
+    //
+    struct Config {
+
+      // Save some typing:
+      using Name = fhicl::Name;
+      using Comment = fhicl::Comment;
+
+      // One Atom for each parameter
+      fhicl::Atom<art::InputTag> SimulationLabel {
+        Name("SimulationLabel"),
+        Comment("tag of the input data product with the detector simulation information")
+        };
+
+      fhicl::Atom<art::InputTag> HitLabel {
+        Name("HitLabel"),
+        Comment("tag of the input data product with reconstructed hits")
+        };
+
+      fhicl::Atom<art::InputTag> ClusterLabel {
+        Name("ClusterLabel"),
+        Comment("tag of the input data product with reconstructed clusters")
+        };
+
+           fhicl::Atom<art::InputTag> SpacePointLabel {
+        Name("SpacePointLabel"),
+        Comment("tag of the input data product with reconstructed Space Point ")
+        };
+
+    
+      fhicl::Atom<int> PDGcode {
+        Name("PDGcode"),
+        Comment("particle type (PDG ID) of the primary particle to be selected")
+        };
+
+      fhicl::Atom<double> BinSize {
+        Name("BinSize"),
+        Comment("dx [cm] used for the dE/dx calculation")
+        };
+
+    }; // Config
+
+  
+    //
+    using Parameters = art::EDAnalyzer::Table<Config>;
+
+    explicit EnergyAna(Parameters const& config);
+    virtual void beginJob() override;
+   virtual void beginRun(const art::Run& run) override;
+    virtual void analyze (const art::Event& event) override;
+
+  private:
+
+    // The parameters we'll read from the .fcl file.
+    art::InputTag fSimulationProducerLabel; ///< The name of the producer that tracked simulated particles through the detector
+    art::InputTag fHitProducerLabel;        ///< The name of the producer that created hits
+    art::InputTag fClusterProducerLabel;    ///< The name of the producer that created clusters
+     art::InputTag fSpacePointProducerLabel;   
+     int fSelectedPDG;                       ///< PDG code of particle we'll focus on
+     double fBinSize;                        ///< For dE/dx work: the value of dx.
+
+    // Pointers to the histograms we'll create.
+    TH1D* fPDGCodeHist;     ///< PDG code of all particles
+    TH1D* fMomentumHist;    ///< momentum [GeV] of all selected particles
+    TH1D* fTrackLengthHist; ///< true length [cm] of all selected particles
+    TH1D* fHitIntegralHist; ///< Hit ADC Integral
+ //   TH2F* hdl_TrueVsRec;
+    //   TGraph2D* SP_gr; 
+    //   TGraph2D* SP_AvePos_gr;
+
+    // The n-tuples we'll create.
+    TTree* fSimulationNtuple;     ///< tuple with simulated data
+    TTree* fSimulationTrackTree;
+    TTree* fReconstructionNtuple; ///< tuple with reconstructed data
+
+
+       geo::GeometryCore const *fGeometry;  
+   
+    // The comment lines with the @ symbols define groups in doxygen.
+    /// @name The variables that will go into both n-tuples.
+    /// @{
+    int fEvent;        ///< number of the event being processed
+    int fRun;          ///< number of the run being processed
+    int fSubRun;       ///< number of the sub-run being processed
+    /// @}
+
+    /// @name The variables that will go into the simulation n-tuple.
+    /// @{
+    int fSimPDG;       ///< PDG ID of the particle being processed
+    int fSimTrackID;   ///< GEANT ID of the particle being processed
+     int wireNumber;
+
+    // Arrays for 4-vectors: (x,y,z,t) and (Px,Py,Pz,E).
+    // Note: old-style C++ arrays are considered obsolete. However,
+    // to create simple n-tuples, we still need to use them.
+    double fStartXYZT[4]; ///< (x,y,z,t) of the true start of the particle
+    double fEndXYZT[4];   ///< (x,y,z,t) of the true end of the particle
+    double fStartPE[4];   ///< (Px,Py,Pz,E) at the true start of the particle
+    double fEndPE[4];     ///< (Px,Py,Pz,E) at the true end of the particle
+
+
+             double lineXM = -720;    double lineYM = -600;     double lineZM = 0;
+             double lineXP = +720;    double lineYP = +600;     double lineZP = 6500;    /// Detector planes  position on XYZ axis 
+
+        int tmx, tmy, tmz, tpx, tpy, tpz;
+        bool cmx, dmx, cmy, dmy, cmz, dmz;
+        bool cpx, dpx, cpy, dpy, cpz, dpz;
+
+           /// Number of dE/dx bins in a given track.
+    int fSimNdEdxBins;
+
+     double MCTrackExitXposmx;
+     double MCTrackExitYposmy;
+     double MCTrackExitZposmz;
+     double MCTrackExitXpospx;
+     double MCTrackExitYpospy;
+     double MCTrackExitZpospz;
+     double   IPl_track_length;
+     double   IPl_MCtrack_length;
+     double trackLength=0.0; 
+
+     double RecTrackExitXposmx;
+     double RecTrackExitYposmy;
+     double RecTrackExitZposmz;
+     double RecTrackExitXpospx;
+     double RecTrackExitYpospy;
+     double RecTrackExitZpospz;
+     
+     double  Extpl_track_length1;
+   double  Extpl_track_length;
+ 
+    /// The vector that will be used to accumulate dE/dx values as a function of range.
+    std::vector<double> fSimdEdxBins;
+     std::vector<double> fSimWireEnergy;  ///< vector for dE/dx values 
+      std::vector<int>    fSimWireNumber;
+    /// @}
+      std::vector<double>  fTrackLength;
+      std::vector<double>  fExtplTrackLength;
+      std::vector<double> fTrackStartXpos;
+      std::vector<double> fTrackStartYpos;
+      std::vector<double> fTrackStartZpos;
+      std::vector<double> fTrackEndXpos;
+      std::vector<double> fTrackEndYpos;
+      std::vector<double> fTrackEndZpos;
+     std::vector<double >fTrackExitXpos;
+     std::vector<double >fTrackExitYpos;
+     std::vector<double >fTrackExitZpos;
+      
+     std::vector<double>fExtpl_track_length;
+     std::vector<double >fRTrackExitXpos;
+     std::vector<double >fRTrackExitYpos;
+     std::vector<double >fRTrackExitZpos;
+
+    /// @name Variables used in the reconstruction n-tuple
+    /// @{
+    int fRecoPDG;       ///< PDG ID of the particle being processed
+    int fRecoTrackID;   ///< GEANT ID of the particle being processed
+
+    /// Number of dE/dx bins in a given track.
+    int fRecoNdEdxBins;
+
+    /// The vector that will be used to accumulate dE/dx values as a function of range.
+    std::vector<double> fRecodEdxBins;
+    std::vector<double> fRecoChargeInt;
+    std::vector<double> fRecoChargeTrue;
+    std::vector<double> fRecoWireNumber;
+     std::vector<double> fRecoWireEnergy;
+    std::vector<double> fRecoPeakTime;
+       std::vector<double> fRec_SpacePoint_X;  
+      std::vector<double> fRec_SpacePoint_Y;
+      std::vector<double> fRec_SpacePoint_Z;
+    /// @}
+
+    // Other variables that will be shared between different methods.
+        geo::GeometryCore const* fGeometryService;   ///< pointer to Geometry provider
+        detinfo::DetectorClocks const* fTimeService; ///< pointer to detector clock time service provider
+        double                   fElectronsToGeV;    ///< conversion factor
+        int                      fTriggerOffset;     ///< (units of ticks) time of expected neutrino event
+
+  }; // class EnergyAna
+
+  /// @}
+  // END EnergyAna group ---------
+  //
+  // -----------------------------------------------------------------
+  // Constructor
+
+  //
+  EnergyAna::EnergyAna(Parameters const& config)
+    : EDAnalyzer(config)
+    , fSimulationProducerLabel(config().SimulationLabel())
+    , fHitProducerLabel       (config().HitLabel())
+    , fClusterProducerLabel   (config().ClusterLabel())
+    , fSpacePointProducerLabel (config().SpacePointLabel())
+    , fSelectedPDG            (config().PDGcode())
+    , fBinSize                (config().BinSize())
+  {
+    // Get a pointer to the geometry service provider.
+    fGeometryService = lar::providerFrom<geo::Geometry>();
+    // The same for detector TDC clock services.
+    fTimeService = lar::providerFrom<detinfo::DetectorClocksService>();
+    // Access to detector properties.
+    const detinfo::DetectorProperties* detprop = lar::providerFrom<detinfo::DetectorPropertiesService>();
+    fTriggerOffset = detprop->TriggerOffset();
+
+    // Since art 2.8, you can and should tell beforehand, here in the constructor,
+    // all the data the module is going to read ("consumes") or might read
+    // ("may_consume"). Diligence here will in the future help the framework
+    // execute modules in parallel, making sure the order is correct.
+    consumes<std::vector<simb::MCParticle>>(fSimulationProducerLabel);
+    consumes<std::vector<sim::SimChannel>>(fSimulationProducerLabel);
+    consumes<art::Assns<simb::MCTruth, simb::MCParticle>>(fSimulationProducerLabel);
+    consumes<std::vector<recob::Hit>>(fHitProducerLabel);
+    consumes<std::vector<recob::Cluster>>(fClusterProducerLabel);
+    consumes<art::Assns<recob::Cluster, recob::Hit>>(fHitProducerLabel);
+    consumes<std::vector<recob::SpacePoint>>(fSpacePointProducerLabel);
+  
+  }
+
+
+  //-----------------------------------------------------------------------
+  void EnergyAna::beginJob()
+  {
+
+    // Access ART's TFileService, which will handle creating and writing
+    // histograms and n-tuples for us.
+    art::ServiceHandle<art::TFileService const> tfs;
+
+  
+    fPDGCodeHist     = tfs->make<TH1D>("pdgcodes",";PDG Code;",                  5000, -2500, 2500);
+    fMomentumHist    = tfs->make<TH1D>("mom",     ";particle Momentum (GeV);",    100, 0.,    10.);
+    fTrackLengthHist = tfs->make<TH1D>("length",  ";particle track length (cm);", 200, 0, 5000);
+    fHitIntegralHist = tfs->make<TH1D>("hitintegral",  ";Hit Integral (sumadc);", 200, 0, 1000.);
+   // hdl_TrueVsRec   = tfs->make<TH2F>("hdl_TrueVsRec", "TrueVsRec", 100, 0, 100, 100, 0, 100);
+   // SP_gr = tfs->make<TGraph2D>();
+   // SP_AvePos_gr = tfs->make<TGraph2D>(3);
+    // Define our n-tuples, which are limited forms of ROOT
+    // TTrees. Start with the TTree itself.
+    fSimulationNtuple     = tfs->make<TTree>("EnergyAnaSimulation",    "EnergyAna Simulation");
+    fSimulationTrackTree     = tfs->make<TTree>("TrackExtrapolation",    "EnergyAna Extrapolation");
+    fReconstructionNtuple = tfs->make<TTree>("EnergyAnaReconstruction","EnergyAna Reconstruction");
+
+    // Define the branches (columns) of our simulation n-tuple. To
+    // write a variable, we give the address of the variable to
+    // TTree::Branch.
+    fSimulationNtuple->Branch("Event",       &fEvent,          "Event/I");
+    fSimulationNtuple->Branch("SubRun",      &fSubRun,         "SubRun/I");
+    fSimulationNtuple->Branch("Run",         &fRun,            "Run/I");
+    fSimulationNtuple->Branch("TrackID",     &fSimTrackID,     "TrackID/I");
+    fSimulationNtuple->Branch("PDG",         &fSimPDG,         "PDG/I");
+    // When we write arrays, we give the address of the array to
+    // TTree::Branch; in C++ this is simply the array name.
+    fSimulationNtuple->Branch("StartXYZT",   fStartXYZT,       "StartXYZT[4]/D");
+    fSimulationNtuple->Branch("EndXYZT",     fEndXYZT,         "EndXYZT[4]/D");
+    fSimulationNtuple->Branch("StartPE",     fStartPE,         "StartPE[4]/D");
+    fSimulationNtuple->Branch("EndPE",       fEndPE,           "EndPE[4]/D");
+    // For a variable-length array: include the number of bins.
+    fSimulationNtuple->Branch("NdEdx",       &fSimNdEdxBins,   "NdEdx/I");
+    // ROOT branches can contain std::vector objects.
+    fSimulationNtuple->Branch("dEdx",        &fSimdEdxBins);
+    fSimulationNtuple->Branch("WireEnergy",    &fSimWireEnergy);
+     fSimulationNtuple->Branch("WireNumber",  &fSimWireNumber);
+   
+    fSimulationTrackTree->Branch("TrackLength",    &fTrackLength);
+   fSimulationTrackTree->Branch("MC_Extpl_track_length",&fExtplTrackLength);
+   fSimulationTrackTree->Branch("TrackExitXpos",    &fTrackExitXpos);
+    fSimulationTrackTree->Branch("TrackExitYpos",    &fTrackExitYpos);
+    fSimulationTrackTree->Branch("TrackExitZpos",    &fTrackExitZpos);
+
+
+    // A similar definition for the reconstruction n-tuple. Note that we
+    // use some of the same variables in both n-tuples.
+    fReconstructionNtuple->Branch("Event",   &fEvent,          "Event/I");
+    fReconstructionNtuple->Branch("SubRun",  &fSubRun,         "SubRun/I");
+    fReconstructionNtuple->Branch("Run",     &fRun,            "Run/I");
+    fReconstructionNtuple->Branch("TrackID", &fRecoTrackID,    "TrackID/I");
+    fReconstructionNtuple->Branch("PDG",     &fRecoPDG,        "PDG/I");
+    fReconstructionNtuple->Branch("NdEdx",   &fRecoNdEdxBins,  "NdEdx/I");
+    fReconstructionNtuple->Branch("dEdx",    &fRecodEdxBins);
+    fReconstructionNtuple->Branch("RecoChargeInt",    &fRecoChargeInt);
+    fReconstructionNtuple->Branch("RecoChargeTrue",    &fRecoChargeTrue);
+    fReconstructionNtuple->Branch("RecoWireNumber",    &fRecoWireNumber);
+    fReconstructionNtuple->Branch("RecoWireEnergy", &fRecoWireEnergy);
+    fReconstructionNtuple->Branch("RecoPeakTime",    &fRecoPeakTime);
+    fReconstructionNtuple->Branch("SpacePoint_X", &fRec_SpacePoint_X);
+    fReconstructionNtuple->Branch("SpacePoint_Y", &fRec_SpacePoint_Y);
+    fReconstructionNtuple->Branch("SpacePoint_Z", &fRec_SpacePoint_Z); 
+   fReconstructionNtuple->Branch("SPExtpl_track_length",&fExtpl_track_length);
+   fReconstructionNtuple->Branch("RTrackExitXpos",    &fRTrackExitXpos);
+   fReconstructionNtuple->Branch("RTrackExitYpos",    &fRTrackExitYpos);
+   fReconstructionNtuple->Branch("RTrackExitZpos",    &fRTrackExitZpos); 
+  }
+
+
+
+  void EnergyAna::beginRun(const art::Run& /*run*/)
+  {
+    // How to convert from number of electrons to GeV. The ultimate
+    // source of this conversion factor is
+    // ${LARCOREOBJ_INC}/larcoreobj/SimpleTypesAndConstants/PhysicalConstants.h.
+    // But sim::LArG4Parameters might in principle ask a database for it.
+    art::ServiceHandle<sim::LArG4Parameters const> larParameters;
+    fElectronsToGeV = 1./larParameters->GeVToElectrons();
+  }
+
+  //-----------------------------------------------------------------------
+  void EnergyAna::analyze(const art::Event& event)
+  {
+    // Start by fetching some basic event information for our n-tuple.
+    fEvent  = event.id().event();
+    fRun    = event.run();
+    fSubRun = event.subRun();
+     art::Handle< std::vector<simb::MCParticle> > particleHandle;
+    if (!event.getByLabel(fSimulationProducerLabel, particleHandle))
+      {
+        throw cet::exception("EnergyAna")
+          << " No simb::MCParticle objects in this event - "
+          << " Line " << __LINE__ << " in file " << __FILE__ << std::endl;
+      }
+
+      art::Handle< std::vector<recob::SpacePoint> > recobspacepoints;
+    event.getByLabel(fSpacePointProducerLabel, recobspacepoints);
+     if (!recobspacepoints->empty())
+    {
+  
+ //   art::Handle< std::vector<simb::MCParticle> > particleHandle;
+
+
+  //  if (!event.getByLabel(fSimulationProducerLabel, particleHandle))
+    //  {
+//	throw cet::exception("EnergyAna")
+//	  << " No simb::MCParticle objects in this event - "
+//	  << " Line " << __LINE__ << " in file " << __FILE__ << std::endl;
+  //    }
+
+
+    // Let's compute the variables for the simulation n-tuple first.
+    fTrackLength.clear();
+    fExtplTrackLength.clear();
+     fTrackExitXpos.clear();
+     fTrackExitYpos.clear();
+     fTrackExitZpos.clear();
+
+     geo::GeometryCore const& geom = *(art::ServiceHandle<geo::Geometry>());
+    auto simChannelHandle = event.getValidHandle<std::vector<sim::SimChannel>>(fSimulationProducerLabel);
+    std::map< int, const simb::MCParticle* > particleMap;
+
+    for ( auto const& particle : (*particleHandle) )
+      {
+	fSimTrackID = particle.TrackId();
+	particleMap[fSimTrackID] = &particle;
+	fSimPDG = particle.PdgCode();
+	fPDGCodeHist->Fill( fSimPDG );
+
+	// For this example, we want to fill the n-tuples and histograms
+	// only with information from the primary particles in the
+	// event, whose PDG codes match a value supplied in the .fcl file.
+	if ( particle.Process() != "primary"  ||  fSimPDG != fSelectedPDG )
+	  continue;
+
+	// A particle has a trajectory, consisting of a set of
+	// 4-positions and 4-mommenta.
+	const size_t numberTrajectoryPoints = particle.NumberTrajectoryPoints();
+
+	// For trajectories, as for vectors and arrays, the first
+	// point is #0, not #1.
+	const int last = numberTrajectoryPoints - 1;
+	const TLorentzVector& positionStart = particle.Position(0);
+	const TLorentzVector& positionEnd   = particle.Position(last);
+	const TLorentzVector& momentumStart = particle.Momentum(0);
+	const TLorentzVector& momentumEnd   = particle.Momentum(last);
+
+	// Make a histogram of the starting momentum.
+	fMomentumHist->Fill( momentumStart.P() );
+
+	// Fill arrays with the 4-values. (Don't be fooled by
+	// the name of the method; it just puts the numbers from
+	// the 4-vector into the array.)
+	positionStart.GetXYZT( fStartXYZT );
+	positionEnd.GetXYZT( fEndXYZT );
+	momentumStart.GetXYZT( fStartPE );
+	momentumEnd.GetXYZT( fEndPE );
+
+          TVector3 dirVMC = momentumStart.Vect();
+        TVector3 unitMC =  dirVMC.Unit();
+           double X_0 = (positionStart.X() + positionEnd.X())/2;
+         double Y_0 = (positionStart.Y() + positionEnd.Y())/2;
+          double Z_0 = (positionStart.Z() + positionEnd.Z())/2;
+         double Position[3];
+        
+	// Use a polar-coordinate view of the 4-vectors to
+	// get the track length 
+          for (size_t tp=1; tp<numberTrajectoryPoints; ++tp)
+             {const  TLorentzVector& positions1 = particle.Position(tp);
+              const  TLorentzVector& positions2 = particle.Position(tp-1);
+              Position[0] = positions1.X();Position[1] = positions1.Y();Position[2] = positions1.Z();
+                   geo::TPCID tpcid = geom.FindTPCAtPosition( Position );
+             if(bool(tpcid))
+               {  trackLength +=std::sqrt( pow(positions1.X() - positions2.X(), 2) + pow(positions1.Y() - positions2.Y(), 2) 
+                                  +  pow(positions1.Z() - positions2.Z(), 2) );
+                         // cout<<"Trajecteries Point position : "<<positions1.Rho()<<endl;
+                          } 
+             }
+
+	//const double trackLength = ( positionEnd - positionStart ).Rho();
+          fTrackLength.push_back(trackLength);
+//	MF_LOG_DEBUG("EnergyAna")
+	 // << "Track length: " << trackLength << " cm"<<endl;
+	fTrackLengthHist->Fill(trackLength);
+   //  Track extrapolation Start Here ##########################################################################################
+   //
+ // std::cout <<" MC Start XYZ Position is P1 =" <<"\t(\t"<< positionStart.X()<<",\t"<<positionStart.Y()<<",\t"<<positionStart.Z()<<"\t)"<<std::endl;
+// std::cout <<" MC End XYZ Position is P2 =" <<"\t(\t"<< positionEnd.X()<<",\t"<<positionEnd.Y()<<",\t"<<positionEnd.Z()<<"\t)"<<std::endl;
+// std::cout<<" X dir\t " <<dirVMC.X()<<"Y dir \t"<<dirVMC.Y()<<"Z dir\t "<<dirVMC.Z()<<"Unit dir \t"<<unitMC.Z()<<std::endl;
+
+ tmx = (lineXM - X_0)/(dirVMC.X());  tmy=(lineYM-  Y_0)/(dirVMC.Y());   tmz  = (lineZM- Z_0)/(dirVMC.Z());
+ tpx = (lineXP -  X_0)/(dirVMC.X());  tpy = (lineYP-  Y_0)/(dirVMC.Y());   tpz  = (lineZP- Z_0)/(dirVMC.Z());
+
+ MCTrackExitXposmx  = lineXM;   MCTrackExitYposmy  = lineYM;   MCTrackExitZposmz  = lineZM;
+ MCTrackExitXpospx  = lineXP;   MCTrackExitYpospy  = lineYP;   MCTrackExitZpospz  = lineZP;
+
+
+ double MCTrackExitYposmx=Y_0 + dirVMC.Y()*tmx;double  MCTrackExitXposmy=X_0 +dirVMC.X()*tmy; double  MCTrackExitXposmz=X_0 +dirVMC.X()*tmz;
+double  MCTrackExitZposmx=Z_0 + dirVMC.Z()*tmx;double MCTrackExitZposmy=Z_0 + dirVMC.Z()*tmy; double   MCTrackExitYposmz=Y_0 +dirVMC.Y()*tmz;
+
+
+double  MCTrackExitYpospx= Y_0 +dirVMC.Y()*tpx; double  MCTrackExitXpospy=X_0 +dirVMC.X()*tpy;  double MCTrackExitXpospz=X_0 + dirVMC.X()*tpz;
+double  MCTrackExitZpospx= Z_0 +dirVMC.Z()*tpx; double  MCTrackExitZpospy=Z_0 +dirVMC.Z()*tpy; double MCTrackExitYpospz=Y_0 +dirVMC.Y()*tpz;
+
+
+ if((MCTrackExitYposmx >= -600. && MCTrackExitYposmx <= 600.) && (MCTrackExitZposmx >= 0. && MCTrackExitZposmx <= 6500.) )
+          {
+                  MCTrackExitXposmx  = lineXM;
+
+         fTrackExitXpos.push_back( MCTrackExitXposmx );
+         fTrackExitYpos.push_back( MCTrackExitYposmx );
+         fTrackExitZpos.push_back( MCTrackExitZposmx );
+
+     IPl_MCtrack_length =  sqrt(pow(MCTrackExitXposmx -  positionStart.X(), 2) + pow(MCTrackExitYposmx -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZposmx -  positionStart.Z(), 2) * 1.0);
+  //  fExtplTrackLength.push_back(IPl_MCtrack_length);
+     std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;
+        }
+         
+      if((MCTrackExitXposmy >= -720. && MCTrackExitXposmy <= 720.) && (MCTrackExitZposmy >= 0. && MCTrackExitZposmy <= 6500.))
+               {
+                      MCTrackExitYposmy  = lineYM;
+
+                        fTrackExitXpos.push_back( MCTrackExitXposmy );
+                        fTrackExitYpos.push_back( MCTrackExitYposmy );
+                        fTrackExitZpos.push_back( MCTrackExitZposmy );
+
+              IPl_MCtrack_length =  sqrt(pow(MCTrackExitXposmy -  positionStart.X(), 2) + pow(MCTrackExitYposmy -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZposmy -  positionStart.Z(), 2) * 1.0);
+    //    fExtplTrackLength.push_back(IPl_MCtrack_length);
+        std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;       
+   }
+       
+        if((MCTrackExitXposmz >= -720. && MCTrackExitXposmz <= 720.) && (MCTrackExitYposmz >= -600. && MCTrackExitYposmz <= 600.))
+               {
+                        fTrackExitXpos.push_back( MCTrackExitXposmz );
+                         fTrackExitYpos.push_back( MCTrackExitYposmz );
+                        fTrackExitZpos.push_back( MCTrackExitZposmz );
+
+              IPl_MCtrack_length =  sqrt(pow(MCTrackExitXposmz -  positionStart.X(), 2) + pow(MCTrackExitYposmz -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZposmz -  positionStart.Z(), 2) * 1.0);
+          //  fExtplTrackLength.push_back(IPl_MCtrack_length);
+         std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;  
+          }
+        if((MCTrackExitYpospx >= -600. && MCTrackExitYpospx <= 600.) && (MCTrackExitZpospx >= 0. && MCTrackExitZpospx <= 6500.))
+                   {
+                      fTrackExitXpos.push_back( MCTrackExitXpospx );
+                      fTrackExitYpos.push_back( MCTrackExitYpospx );
+                      fTrackExitZpos.push_back( MCTrackExitZpospx );
+
+                  IPl_MCtrack_length =  sqrt(pow(MCTrackExitXpospx -  positionStart.X(), 2) + pow(MCTrackExitYpospx -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZpospx -  positionStart.Z(), 2) * 1.0);
+             //   fExtplTrackLength.push_back(IPl_MCtrack_length);
+                std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;  
+              }
+           if( (MCTrackExitXpospy >= -720. && MCTrackExitXpospy <= 720.) && (MCTrackExitZpospy >= 0. && MCTrackExitZpospy <= 6500.))
+                {         fTrackExitXpos.push_back( MCTrackExitXpospy );
+                         fTrackExitYpos.push_back( MCTrackExitYpospy );
+                         fTrackExitZpos.push_back( MCTrackExitZpospy );
+
+                  IPl_MCtrack_length =  sqrt(pow(MCTrackExitXpospy -  positionStart.X(), 2) + pow(MCTrackExitYpospy -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZpospy -  positionStart.Z(), 2) * 1.0);
+             //   fExtplTrackLength.push_back(IPl_MCtrack_length);
+              std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;    
+            }
+ 
+     if( (MCTrackExitXpospz >= -720. && MCTrackExitXpospz <= 720.) && (MCTrackExitYpospz >= -600. && MCTrackExitYpospz <= 600.) )
+                {
+                     fTrackExitXpos.push_back( MCTrackExitXpospz );
+                     fTrackExitYpos.push_back( MCTrackExitYpospz );
+                     fTrackExitZpos.push_back( MCTrackExitZpospz );
+                  IPl_MCtrack_length =  sqrt(pow(MCTrackExitXpospz -  positionStart.X(), 2) + pow(MCTrackExitYpospz -  positionStart.Y(), 2)
+                                 + pow(MCTrackExitZpospz -  positionStart.Z(), 2) * 1.0);
+             // fExtplTrackLength.push_back(IPl_MCtrack_length);
+              std::cout<<"Extrapolated True Track Length-1 is = \t "<<IPl_MCtrack_length<< "\t cm "<<std::endl;
+               }  
+     
+  std::cout <<" MC Track XYZ Position is P1 =" <<"\t(\t"<< fTrackExitXpos[0]<<",\t"<<fTrackExitYpos[0]<<",\t"<<fTrackExitZpos[0]<<"\t)"<<std::endl;
+ std::cout <<" MC Track XYZ Position is P2 =" <<"\t(\t"<< fTrackExitXpos[1]<<",\t"<<fTrackExitYpos[1]<<",\t"<<fTrackExitZpos[1]<<"\t)"<<std::endl;
+
+  IPl_MCtrack_length =sqrt(pow(fTrackExitXpos[0]-fTrackExitXpos[1], 2)+pow(fTrackExitYpos[0]-fTrackExitYpos[1], 2)+pow(fTrackExitZpos[0]-fTrackExitZpos[1], 2) * 1.0);
+   fExtplTrackLength.push_back(IPl_MCtrack_length);
+  std::cout<<"Extrapolated True Track Length is = \t "<< IPl_MCtrack_length<< "\t cm and Addition track length is = "<<trackLength<<std::endl;
+
+    //    std::cout << "True Extrapolated Track Length = \t"<<IPl_MCtrack_length<<"\t cm "<<std::endl;
+       
+//  ##############################################    END of  TRACK EXTRAPOLATION #################################################################
+
+
+      } // particle@ 
+
+ 
+    fSimulationTrackTree->Fill();
+	
+        //fSimWireEnergy.clear();      // jd              ///< Clear vectors at beginning of loop
+	//fSimWireNumber.clear();  // jd
+       // float energyDepositA = 0;
+        
+	// To look at the energy deposited by this particle's track,
+	// we loop over the SimChannel objects in the event.
+	for ( auto const& channel : (*simChannelHandle) )
+	  {
+	    float energyDepositA = 0; //jd
+	    auto const channelNumber = channel.Channel();
+            wireNumber = (int)channel.Channel();//jd ///< Set wire number
+	     fSimWireEnergy.clear();      // jd  // old clearing place               ///< Clear vectors at beginning of loop
+	    fSimWireNumber.clear();  // jd    // old clearing place 
+
+	    if ( fGeometryService->SignalType( channelNumber ) != geo::kCollection )
+	      continue;
+
+	
+	    auto const& timeSlices = channel.TDCIDEMap();
+
+	    // For every time slice in this channel:
+	    for ( auto const& timeSlice : timeSlices )
+	      {
+            
+                   auto const& chargeDeposits = timeSlice.second;   //jd  
+	      for (auto const& chargeDeposit : chargeDeposits)  //jd
+		{
+                
+		  energyDepositA += chargeDeposit.numElectrons * fElectronsToGeV; // jd
+		  
+		} // End chargeDeposit loop
+		
+		
+	      } // For each time slice
+                  fSimWireEnergy.push_back(energyDepositA); //jd  // old filling place
+	          fSimWireNumber.push_back(wireNumber); //jd     // old filling place 
+                  fSimulationNtuple->Fill();
+	  } // For each SimChannel
+       
+   
+    // Reconstruction n-tuple
+    //
+    art::Handle< std::vector<recob::Hit> > hitHandle;
+    if (!event.getByLabel(fHitProducerLabel, hitHandle)) return;
+
+    std::map< int, std::vector<double> > dEdxMap;
+
+    double energyDepositB = 0; //jd
+    // double LifeTimeCurrection = 0;
+     fRecoChargeInt.clear();
+     fRecoChargeTrue.clear();  // old initialization 
+     fRecoPeakTime.clear();
+     fRecoWireEnergy.clear(); 
+
+    // For every Hit:
+    for ( auto const& hit : (*hitHandle) )
+      {
+	 auto hitChannelNumber = hit.Channel();
+         auto hitIntegral = hit.Integral();
+         auto hitAmplitude   = hit.PeakAmplitude();
+         fHitIntegralHist->Fill(hitIntegral);
+	// We have a hit. For this example let's just focus on the
+	// hits in the collection plane.
+	if ( fGeometryService->SignalType( hitChannelNumber ) != geo::kCollection)  
+	  continue;
+
+	MF_LOG_DEBUG("EnergyAna")
+	  << "Hit in collection plane"<<"JD \t "<< energyDepositB 
+	  << std::endl;
+   
+	
+
+      //  energyDepositB += ((hitIntegral*exp((hit.PeakTime()*1e-6)/0.003)*23.6e-6)/((5.58e-3)*.63)); //wd e Life-Time(3ms) Correction +Rocomb+C 
+      //    energyDepositB += (hitIntegral*exp((hit.PeakTime()*1e-6)/0.003));   // wd e lifetime currection only //  
+          energyDepositB += (hitIntegral);   // wd e only //
+//	LifeTimeCurrection = exp((hit.PeakTime()*1e-6)/0.003);
+    // std::cout<<"EnergyRecnstructed = \t"<<energyDepositB<<"\t Electron Life Time Correction : \t "<<exp((hit.PeakTime()*1e-6)/0.003)<<"\n"; 
+      MF_LOG_DEBUG("EnergyAna")
+	      << std::endl;
+                 fRecoChargeInt.push_back(hitIntegral);  // We should work with this quantity , 
+                 fRecoChargeTrue.push_back(hitAmplitude);  // this have noise .....
+                 fRecoWireNumber.push_back(hitChannelNumber);
+                 fRecoPeakTime.push_back(hit.PeakTime());
+               //  fRecoWireEnergy.push_back(energyDepositB);
+
+
+	         MF_LOG_DEBUG("EnergyAna")
+		  << "Hit index = " << hit.LocalIndex()
+		  << " channel number = " << hitChannelNumber
+		  << " start TDC tick = " << hit.StartTick()
+		  << " end TDC tick = " << hit.EndTick()
+		  << " peak TDC tick = " << hit.PeakTime()
+		  << " sigma peak time = " << hit.SigmaPeakTime()
+		  << " adjusted start TDC tick = " << fTimeService->TPCTick2TDC(hit.StartTick())
+		  << " adjusted end TDC tick = " << fTimeService->TPCTick2TDC(hit.EndTick())
+		  << " adjusted peak TDC tick = " << fTimeService->TPCTick2TDC(hit.PeakTime())
+		  << " time = " << time
+		  << std::endl;
+
+      } // for each Hit
+        fRecoWireEnergy.push_back(energyDepositB); // old 
+       //std::cout<<"EnergyRecnstructed = \t"<<energyDepositB<<"\t GeV \t Electron Life Time Correction : \t "<<LifeTimeCurrection<<"\n";  
+       // fRecoWireNumber.push_back(hitChannelNumber);
+   
+      // ##########   Reconstructed Space Point Estimation ###############         
+          art::Handle< art::Assns<recob::SpacePoint,recob::Hit, void>> recoSPHits;
+          event.getByLabel(fSpacePointProducerLabel, recoSPHits);
+           art::Handle< std::vector<recob::SpacePoint> > recobspacepoints;
+            event.getByLabel(fSpacePointProducerLabel, recobspacepoints);
+              
+              TGraph2D * SP_gr = new TGraph2D();
+             TGraph2D * SP_AvePos_gr = new TGraph2D(3);   
+            fRec_SpacePoint_X.clear();
+            fRec_SpacePoint_Y.clear();
+            fRec_SpacePoint_Z.clear();
+            fExtpl_track_length.clear();
+            fRTrackExitXpos.clear();
+            fRTrackExitYpos.clear();
+            fRTrackExitZpos.clear();
+// #######################################   Space Points and Hits #################         
+    /*      for (size_t isph=0;isph<recoSpHits->size(); ++isph)
+              {
+
+                  art::Ptr<recob::SpacePoint, recob::Hit,void> recSPoint(recoSPHits, isph);
+                 const recob::SpacePoint& RecSPH = *recSPoint;
+                double x = RecSP.XYZ()[0];
+                double y = RecSP.XYZ()[1];
+                double z = RecSP.XYZ()[2];
+
+           SP_gr->SetPoint(isp,x,y,z);
+
+                       fRec_SpacePoint_X.push_back(x);
+                       fRec_SpacePoint_Y.push_back(y);
+                       fRec_SpacePoint_Z.push_back(z);
+               } */        
+//  #######################################   SPace Point and Hits #############################
+
+             if (!recobspacepoints->empty())
+            {
+	       
+	    for (size_t isp=0;isp<recobspacepoints->size(); ++isp)
+	      {
+
+                  art::Ptr<recob::SpacePoint> recSPoint(recobspacepoints, isp);
+                 const recob::SpacePoint& RecSP = *recSPoint; 
+		double x = RecSP.XYZ()[0];
+		double y = RecSP.XYZ()[1];
+		double z = RecSP.XYZ()[2];
+             
+           SP_gr->SetPoint(isp,x,y,z);		
+               
+                       fRec_SpacePoint_X.push_back(x);
+                       fRec_SpacePoint_Y.push_back(y);
+                       fRec_SpacePoint_Z.push_back(z);
+               } // for () 
+        
+ // $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$  PCA   ##########################################
+
+      double* xyz[3];
+     TVector3 pos(0,0,0);
+    TVector3 dir;
+      xyz[0] = fRec_SpacePoint_X.data();
+      xyz[1] = fRec_SpacePoint_Y.data();
+      xyz[2] = fRec_SpacePoint_Z.data();
+
+    size_t npts = fRec_SpacePoint_X.size();
+    
+         if (npts < 2)
+            {
+               throw cet::exception("tpcvechitfinder2_module.cc: too few TPCClusters to fit a line in linefit");
+            }
+      
+      TMatrixDSym covmat(3);  // covariance matrix (use symmetric version)
+     // position is just the average of the coordinates
+      double psum[3] = {0,0,0};
+        for (size_t ipoint=0; ipoint<npts; ++ipoint)
+              { 
+               for(size_t j=0; j<3; j++) 
+                  {
+                    psum[j] += xyz[j][ipoint];
+                   }
+                 }
+       for (size_t j=0; j<3; ++j)
+        {
+          psum[j] /= npts;
+        }
+    pos.SetXYZ(psum[0],psum[1],psum[2]);
+
+  for (size_t i=0; i<3; ++i)
+        {
+          for (size_t j=0; j<= i; ++j)
+            {
+              double csum=0;
+              for (size_t ipoint=0; ipoint<npts; ++ipoint)
+                {
+                  csum += (xyz[i][ipoint] - psum[i]) * (xyz[j][ipoint] - psum[j]);
+                }
+              csum /= (npts-1);
+              covmat[i][j] = csum;
+              covmat[j][i] = csum;
+            }
+        }
+      TVectorD eigenvalues(3);
+      TMatrixD eigenvectors = covmat.EigenVectors(eigenvalues);
+      
+     double dirv[3] = {0,0,0};
+
+      for (size_t i=0; i<3; ++i)
+        {
+          dirv[i]=eigenvectors[i][0]; 
+         }
+      dir.SetXYZ(dirv[0],dirv[1],dirv[2]);
+      float chi2ndf = 0;
+      for (size_t i=0; i<npts; ++i)
+        {
+          TVector3 pt(fRec_SpacePoint_X[i],fRec_SpacePoint_Y[i],fRec_SpacePoint_Z[i]);
+          double dist = ((pt - pos).Cross(dir)).Mag(); // no uncertainties for now -- set all to 1
+          chi2ndf += dist*dist;
+        }
+    
+      if (npts == 2)
+        {
+          chi2ndf = 1; // a choice -- same as the choice in fitlines6ls
+        }
+      else
+        {
+          chi2ndf /= (npts-2);
+        }
+            cout<<"Ave Space Point Position P  =(\t "<<pos[0]<<",\t"<<pos[1]<<",\t"<<pos[2]<<"\t)"<<endl;
+ //  $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$   PCA  END ################################################               
+ //  $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$         Track Length Estimation from Space Point  $$$$$  
+  
+ 
+// std::cout<<" X dir\t " <<dirv[0]<<"\tY dir \t"<<dirv[1]<<"\t Z dir\t "<<dirv[2]<<std::endl;
+
+ tmx = (lineXM - pos[0])/(dirv[0]);  tmy=(lineYM- pos[1])/(dirv[1]);   tmz  = (lineZM- pos[2])/(dirv[2]);
+ tpx = (lineXP - pos[0])/(dirv[0]);  tpy = (lineYP- pos[1])/(dirv[1]);   tpz  = (lineZP- pos[2])/(dirv[2]);
+
+ RecTrackExitXposmx  = lineXM;   RecTrackExitYposmy  = lineYM;             RecTrackExitZposmz  = lineZM;
+ RecTrackExitXpospx  = lineXP;   RecTrackExitYpospy  = lineYP;              RecTrackExitZpospz  = lineZP;
+
+
+ double RecTrackExitYposmx=pos[1] + dirv[1]*tmx;double  RecTrackExitXposmy=pos[0]+dirv[0]*tmy; double  RecTrackExitXposmz=pos[0]+dirv[0]*tmz;
+double  RecTrackExitZposmx=pos[2] + dirv[2]*tmx;double RecTrackExitZposmy=pos[2] + dirv[2]*tmy; double RecTrackExitYposmz=pos[1]+dirv[1]*tmz;
+
+double  RecTrackExitYpospx=pos[1]+dirv[1]*tpx; double  RecTrackExitXpospy=pos[0] +dirv[0]*tpy;  double RecTrackExitXpospz=pos[0]+dirv[0]*tpz;
+double  RecTrackExitZpospx=pos[2]+dirv[2]*tpx; double  RecTrackExitZpospy=pos[2] +dirv[2]*tpy; double RecTrackExitYpospz=pos[1]+dirv[1]*tpz;
+
+
+ if( (RecTrackExitYposmx >= -600. && RecTrackExitYposmx < 600.) && (RecTrackExitZposmx >= 0. && RecTrackExitZposmx < 6500.) )
+          {
+         fRTrackExitXpos.push_back( RecTrackExitXposmx ); 
+         fRTrackExitYpos.push_back( RecTrackExitYposmx );  
+         fRTrackExitZpos.push_back( RecTrackExitZposmx );
+     Extpl_track_length1 = sqrt(pow(RecTrackExitXposmx -  pos[0], 2) + pow(RecTrackExitYposmx -  pos[1], 2)+pow(RecTrackExitZposmx -pos[2], 2) * 1.0);
+    // std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;      
+         }
+       if( (RecTrackExitXposmy > -720. && RecTrackExitXposmy < 720.) && (RecTrackExitZposmy > 0. && RecTrackExitZposmy < 6500.))
+               {
+                        fRTrackExitXpos.push_back( RecTrackExitXposmy );
+                        fRTrackExitYpos.push_back( RecTrackExitYposmy );
+                        fRTrackExitZpos.push_back( RecTrackExitZposmy );
+    Extpl_track_length1 = sqrt(pow(RecTrackExitXposmy -pos[0], 2) + pow(RecTrackExitYposmy -  pos[1], 2) + pow(RecTrackExitZposmy -pos[2], 2) * 1.0);
+  //      std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+ }
+     
+        if((RecTrackExitXposmz >= -720. && RecTrackExitXposmz < 720.) && (RecTrackExitYposmz >= -600. && RecTrackExitYposmz < 600.))
+               {   
+                         fRTrackExitXpos.push_back( RecTrackExitXposmz );
+                         fRTrackExitYpos.push_back( RecTrackExitYposmz );
+                        fRTrackExitZpos.push_back( RecTrackExitZposmz );
+    Extpl_track_length1=sqrt(pow(RecTrackExitXposmz -  pos[0], 2)+pow(RecTrackExitYposmz -  pos[1], 2) +pow(RecTrackExitZposmz -  pos[2], 2) * 1.0);
+ // std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+
+      }
+        if((RecTrackExitYpospx >= -600. && RecTrackExitYpospx < 600.) && (RecTrackExitZpospx >= 0. && RecTrackExitZpospx < 6500.))
+                   {
+                   
+                    fRTrackExitXpos.push_back( RecTrackExitXpospx );
+                    fRTrackExitYpos.push_back( RecTrackExitYpospx );
+                    fRTrackExitZpos.push_back( RecTrackExitZpospx );
+  
+      Extpl_track_length1=sqrt(pow(RecTrackExitXpospx-pos[0], 2)+pow(RecTrackExitYpospx - pos[1], 2)+pow(RecTrackExitZpospx-pos[2], 2) * 1.0);        
+   //  std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+          }
+      if( (RecTrackExitXpospy >= -720. && RecTrackExitXpospy < 720.) && (RecTrackExitZpospy >= 0. && RecTrackExitZpospy < 6500.))
+                                                                                                                                                               {   
+                fRTrackExitXpos.push_back( RecTrackExitXpospy );
+                fRTrackExitYpos.push_back( RecTrackExitYpospy );
+                fRTrackExitZpos.push_back( RecTrackExitZpospy ); 
+
+   Extpl_track_length1=sqrt(pow(RecTrackExitXpospy -  pos[0], 2)+pow(RecTrackExitYpospy -  pos[1], 2)+pow(RecTrackExitZpospy-pos[2], 2) * 1.0);
+    //  std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+         }
+     //      else
+     if( (RecTrackExitXpospz >= -720. && RecTrackExitXpospz < 720.) && (RecTrackExitYpospz >= -600. && RecTrackExitYpospz < 600.) )
+                { 
+                     fRTrackExitXpos.push_back( RecTrackExitXpospz );
+                     fRTrackExitYpos.push_back( RecTrackExitYpospz );
+                     fRTrackExitZpos.push_back( RecTrackExitZpospz );
+                
+  Extpl_track_length1 =  sqrt(pow(RecTrackExitXpospz -  pos[0], 2) + pow(RecTrackExitYpospz -  pos[1], 2)+pow(RecTrackExitZpospz -  pos[2], 2) * 1.0);
+  // std::cout<<"Extrapolated Track Length-1 is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+          }
+          
+                 
+     for (size_t i=0; i<2; ++i)
+        { std::cout<<"End point of the Tracks P = (\t "<<fRTrackExitXpos[i]<< ",\t"<<fRTrackExitYpos[i]<<",\t"<<fRTrackExitZpos[i]<<")\t"<<std::endl;
+        }
+
+ Extpl_track_length1 =sqrt(pow(fRTrackExitXpos[0]-fRTrackExitXpos[1], 2)+pow(fRTrackExitYpos[0]-fRTrackExitYpos[1], 2)+pow(fRTrackExitZpos[0]-fRTrackExitZpos[1], 2) * 1.0);
+
+     fExtpl_track_length.push_back(Extpl_track_length1);
+   std::cout<<"Extrapolated Track Length from Space-Point is = \t "<< Extpl_track_length1<< "\t cm "<<std::endl;
+
+           TCanvas *tc1 = new TCanvas("tc1","Rec Space-Point",0,0,800,600);
+             TH2D *h = new TH2D("h","Space",100,-720,720,100,-600,600);
+             gStyle->SetOptStat(0);
+             SP_gr->SetHistogram(h);
+             SP_gr->SetMinimum(0.0);SP_gr->SetMaximum(6500);
+             SP_gr->Draw("p0");
+             SP_gr->SetTitle("Space Point ; X; Y; Z");
+             SP_gr->GetXaxis()->CenterTitle();SP_gr->GetYaxis()->CenterTitle();SP_gr->GetZaxis()->CenterTitle();
+             SP_gr->GetXaxis()->SetTitleOffset(1.5);SP_gr->GetYaxis()->SetTitleOffset(1.5);SP_gr->GetZaxis()->SetTitleOffset(1.3);
+             SP_AvePos_gr->SetPoint(0,pos[0],pos[1],pos[2]);
+             SP_AvePos_gr->SetPoint(1,fRTrackExitXpos[0],fRTrackExitYpos[0],fRTrackExitZpos[0]);
+             SP_AvePos_gr->SetPoint(2,fRTrackExitXpos[1],fRTrackExitYpos[1],fRTrackExitZpos[1]);
+             SP_AvePos_gr->SetMarkerColor(kRed);
+             SP_AvePos_gr->SetMarkerStyle(20);
+             SP_AvePos_gr->SetMarkerSize(1.5);
+             SP_AvePos_gr->SetMinimum(0.0);SP_AvePos_gr->SetMaximum(6500);
+             SP_AvePos_gr->Draw("p same");
+             tc1->Print("SpacePoint_location.root");
+            tc1->SaveAs("/dune/app/users/jdsingh/OCT2019Work/DUNEWork/MUSUNWork/myplot/SpacePoint.pdf"); 
+      
+                                                                                                                                                             }  //  if ReC Space Point is Empty  
+     
+
+	fReconstructionNtuple->Fill();  // old 
+   } // if(SpacePoint)
+} // EnergyAna::analyze()
+
+DEFINE_ART_MODULE(EnergyAna)
+
+} // namespace example
+} // namespace lar
+
+
+

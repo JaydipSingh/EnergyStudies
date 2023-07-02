@@ -1,0 +1,65 @@
+# Taken by example of AnalysisPractice_run.fcl
+# ---------------------------------------------
+# Jaydip Singh
+# 10 July 2017	
+# EnergyOnWireSum_run.fcl
+# jdsingh@fnal.gov
+# ---------------------------------------------
+
+#include "services_dune.fcl"
+#include "trackfindermodules.fcl"
+
+process_name: trackAna
+
+services:
+{
+  TFileService:		{ fileName: "trackAna.root" }
+  TimeTracker:		{}
+  RandomNumberGenerator:{}
+  MemoryTracker:	{} #default is 1
+  message:		@local::dune_message_services_prod
+  FileCatalogMetadata:	@local::art_file_catalog_mc
+  			@table::dunefd_simulation_services
+}
+
+source:
+{
+  module_type: RootInput
+  maxEvents:   -1
+}
+
+physics:
+{
+  analyzers:
+  {
+    trackAna:
+    {
+     module_type:	"trackAna"
+     SimulationLabel: 	"largeant"
+     HitLabel:        "gaushit"
+     ClusterLabel:    "trajcluster"
+  #   SpacePointLabel: "pandora"
+   #  SpacePointLabel: "reco3d"
+       TrackLabel:  "pandoraTrack"
+     PDGcode1:          13
+     PDGcode2:    	-13
+     BinSize:          0.3
+
+     }
+  }
+  
+  #stream1:	[ out1 ]
+  analysis: 	[ trackAna ]
+  end_paths: 	[ analysis ] #, stream1 ]
+}
+
+outputs:
+{
+ out1:
+ {
+   module_type: RootOutput
+   fileName:    "%ifb_%tc_practice_qwertyGeV.root"
+   dataTier:    "full-reconstructed"
+   compressionLevel: 1
+ }
+}
